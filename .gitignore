@@ -47,3 +47,6 @@ lerna-debug.log*
 .tool-versions
 
 /prisma/migrations/*
+
+.history
+docker_volumes

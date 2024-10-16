@@ -9,7 +9,7 @@ services:
     command: >
       redis-server --port 6379 --appendonly yes
     volumes:
-      - evolution_redis:/data
+      - ../../docker_volumes/evolution_redis:/data
     ports:
       - 6379:6379
 

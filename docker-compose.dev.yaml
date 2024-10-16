@@ -4,12 +4,9 @@ services:
     image: evolution/api:local
     build: .
     restart: always
-    ports:
-      - 8080:8080
     volumes:
-      - evolution_instances:/evolution/instances
-    networks:
-      - evolution-net
+      - ./docker_volumes/evolution_instances:/evolution/instances
+    network_mode: host
     env_file:
       - .env
     expose:
@@ -18,8 +15,3 @@ services:
 volumes:
   evolution_instances:
 
-
-networks:
-  evolution-net:
-    name: evolution-net
-    driver: bridge
