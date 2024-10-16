@@ -37,6 +37,7 @@ services:
     container_name: evolution_api_redis
     command: >
       redis-server --port 6379 --appendonly yes
+    restart: always
     volumes:
       - ./docker_volumes/evolution_redis_data:/data
     ports:
@@ -45,6 +46,7 @@ services:
   evolution_api_rabbitmq:
     container_name: evolution_api_rabbitmq
     image: rabbitmq:management
+    restart: always
     environment:
       - RABBITMQ_ERLANG_COOKIE=${RABBITMQ_ERLANG_COOKIE}
       - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_DEFAULT_VHOST}
