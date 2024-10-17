@@ -15,7 +15,8 @@
     "db:deploy": "node runWithProvider.js \"rm -rf ./prisma/migrations && cp -r ./prisma/DATABASE_PROVIDER-migrations ./prisma/migrations && npx prisma migrate deploy --schema ./prisma/DATABASE_PROVIDER-schema.prisma\"",
     "db:studio": "node runWithProvider.js \"npx prisma studio --schema ./prisma/DATABASE_PROVIDER-schema.prisma\"",
     "db:migrate:dev": "node runWithProvider.js \"rm -rf ./prisma/migrations && cp -r ./prisma/DATABASE_PROVIDER-migrations ./prisma/migrations && npx prisma migrate dev --schema ./prisma/DATABASE_PROVIDER-schema.prisma && cp -r ./prisma/migrations/* ./prisma/DATABASE_PROVIDER-migrations\"",
-    "serve": "./docker/scripts/docker-start.sh"
+    "serve": "./docker/scripts/docker-start.sh",
+    "serve:alone": "./docker/scripts/stop-docker-containers.sh && ./docker/scripts/docker-start.sh"
   },
   "repository": {
     "type": "git",
