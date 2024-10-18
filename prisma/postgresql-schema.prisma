@@ -105,6 +105,7 @@ model Instance {
   Flowise                 Flowise[]
   FlowiseSetting          FlowiseSetting?
   Pusher                  Pusher?
+  Slack                   Slack?
 }
 
 model Session {
@@ -285,6 +286,17 @@ model Sqs {
 model Websocket {
   id         String    @id @default(cuid())
   enabled    Boolean   @default(false) @db.Boolean
+  events     Json      @db.JsonB
+  createdAt  DateTime? @default(now()) @db.Timestamp
+  updatedAt  DateTime  @updatedAt @db.Timestamp
+  Instance   Instance  @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  instanceId String    @unique
+}
+
+model Slack {
+  id         String    @id @default(cuid())
+  enabled    Boolean   @default(false) @db.Boolean
+  channelWebhookUrl      String    @db.VarChar(255)
   events     Json      @db.JsonB
   createdAt  DateTime? @default(now()) @db.Timestamp
   updatedAt  DateTime  @updatedAt @db.Timestamp

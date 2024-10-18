@@ -11,22 +11,20 @@ WORKDIR /evolution
 
 COPY ./package.json ./tsconfig.json ./
 
-RUN npm install -f
-
+# Move the application code copy here
 COPY ./src ./src
 COPY ./public ./public
 COPY ./prisma ./prisma
 COPY ./manager ./manager
-COPY ./.env.example ./.env
+COPY ./.env ./.env
 COPY ./runWithProvider.js ./
 COPY ./tsup.config.ts ./
 
-COPY ./Docker ./Docker
+COPY ./docker ./docker
 
-RUN chmod +x ./Docker/scripts/* && dos2unix ./Docker/scripts/*
-
-RUN ./Docker/scripts/generate_database.sh
-
+RUN npm install -f
+RUN chmod +x ./docker/scripts/* && dos2unix ./docker/scripts/*
+RUN ./docker/scripts/generate_database.sh
 RUN npm run build
 
 FROM node:20-alpine AS final
@@ -47,7 +45,7 @@ COPY --from=builder /evolution/prisma ./prisma
 COPY --from=builder /evolution/manager ./manager
 COPY --from=builder /evolution/public ./public
 COPY --from=builder /evolution/.env ./.env
-COPY --from=builder /evolution/Docker ./Docker
+COPY --from=builder /evolution/docker ./docker
 COPY --from=builder /evolution/runWithProvider.js ./runWithProvider.js
 COPY --from=builder /evolution/tsup.config.ts ./tsup.config.ts
 
@@ -55,4 +53,4 @@ ENV DOCKER_ENV=true
 
 EXPOSE 8080
 
-ENTRYPOINT ["/bin/bash", "-c", ". ./Docker/scripts/deploy_database.sh && npm run start:prod" ]
+ENTRYPOINT ["/bin/bash", "-c", ". ./docker/scripts/deploy_database.sh && npm run start:prod"]

@@ -136,4 +136,45 @@ const deleteFile = async (folder: string, fileName: string) => {
   }
 };
 
-export { BUCKET, deleteFile, getObjectUrl, uploadFile, uploadTempFile };
+const deleteObjectByKey = async (objectKey: string) => {
+  if (minioClient) {
+    try {
+      return await minioClient.removeObject(bucketName, objectKey);
+    } catch (error) {
+      logger.error(error);
+      return error;
+    }
+  }
+};
+
+const listObjects = async (folder: string) => {
+  if (minioClient) {
+    try {
+      return new Promise((resolve, reject) => {
+        const objects = [];
+        const folderName = join('evolution-api', folder);
+        console.log({ folderName, bucketName });
+        const listStream = minioClient.listObjectsV2(bucketName, '', true);
+
+        listStream.on('data', (obj) => {
+          // objects.push(obj.name);
+          console.log(obj);
+        });
+
+        listStream.on('end', () => {
+          console.log({ objects });
+          resolve(objects);
+        });
+
+        listStream.on('error', (error) => {
+          reject(error);
+        });
+      });
+    } catch (error) {
+      console.error(error);
+      return error;
+    }
+  }
+};
+
+export { BUCKET, deleteFile, deleteObjectByKey, getObjectUrl, listObjects, uploadFile, uploadTempFile };

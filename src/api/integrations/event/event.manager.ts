@@ -1,5 +1,6 @@
 import { PusherController } from '@api/integrations/event/pusher/pusher.controller';
 import { RabbitmqController } from '@api/integrations/event/rabbitmq/rabbitmq.controller';
+import { SlackController } from '@api/integrations/event/slack/slack.controller';
 import { SqsController } from '@api/integrations/event/sqs/sqs.controller';
 import { WebhookController } from '@api/integrations/event/webhook/webhook.controller';
 import { WebsocketController } from '@api/integrations/event/websocket/websocket.controller';
@@ -13,6 +14,7 @@ export class EventManager {
   private websocketController: WebsocketController;
   private webhookController: WebhookController;
   private rabbitmqController: RabbitmqController;
+  private slackController: SlackController;
   private sqsController: SqsController;
   private pusherController: PusherController;
 
@@ -25,6 +27,7 @@ export class EventManager {
     this.rabbitmq = new RabbitmqController(prismaRepository, waMonitor);
     this.sqs = new SqsController(prismaRepository, waMonitor);
     this.pusher = new PusherController(prismaRepository, waMonitor);
+    this.slack = new SlackController(prismaRepository, waMonitor);
   }
 
   public set prisma(prisma: PrismaRepository) {
@@ -67,6 +70,14 @@ export class EventManager {
     return this.rabbitmqController;
   }
 
+  public set slack(slack: SlackController) {
+    this.slackController = slack;
+  }
+
+  public get slack() {
+    return this.slackController;
+  }
+
   public set sqs(sqs: SqsController) {
     this.sqsController = sqs;
   }
@@ -87,6 +98,7 @@ export class EventManager {
     this.rabbitmq.init();
     this.sqs.init();
     this.pusher.init();
+    this.slack.init();
   }
 
   public async emit(eventData: {
@@ -105,6 +117,7 @@ export class EventManager {
     await this.sqs.emit(eventData);
     await this.webhook.emit(eventData);
     await this.pusher.emit(eventData);
+    await this.slack.emit(eventData);
   }
 
   public async setInstance(instanceName: string, data: any): Promise<any> {
