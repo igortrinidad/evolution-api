@@ -1,12 +1,13 @@
 import { InstanceDto } from '@api/dto/instance.dto';
 import {
   SendAudioDto,
-  SendButtonDto,
+  SendButtonsDto,
   SendContactDto,
   SendListDto,
   SendLocationDto,
   SendMediaDto,
   SendPollDto,
+  SendPtvDto,
   SendReactionDto,
   SendStatusDto,
   SendStickerDto,
@@ -39,6 +40,13 @@ export class SendMessageController {
     throw new BadRequestException('Owned media must be a url or base64');
   }
 
+  public async sendPtv({ instanceName }: InstanceDto, data: SendPtvDto, file?: any) {
+    if (file || isURL(data?.video) || isBase64(data?.video)) {
+      return await this.waMonitor.waInstances[instanceName].ptvMessage(data, file);
+    }
+    throw new BadRequestException('Owned media must be a url or base64');
+  }
+
   public async sendSticker({ instanceName }: InstanceDto, data: SendStickerDto, file?: any) {
     if (file || isURL(data.sticker) || isBase64(data.sticker)) {
       return await this.waMonitor.waInstances[instanceName].mediaSticker(data, file);
@@ -56,7 +64,7 @@ export class SendMessageController {
     }
   }
 
-  public async sendButtons({ instanceName }: InstanceDto, data: SendButtonDto) {
+  public async sendButtons({ instanceName }: InstanceDto, data: SendButtonsDto) {
     return await this.waMonitor.waInstances[instanceName].buttonMessage(data);
   }
 

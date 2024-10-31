@@ -401,7 +401,6 @@ export class ChatwootService {
 
       return true;
     } catch (error) {
-      this.logger.error(error);
       return false;
     }
   }
@@ -933,9 +932,11 @@ export class ChatwootService {
   ) {
     if (sourceId && this.isImportHistoryAvailable()) {
       const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId]);
-      if (messageAlreadySaved.size > 0) {
-        this.logger.warn('Message already saved on chatwoot');
-        return null;
+      if (messageAlreadySaved) {
+        if (messageAlreadySaved.size > 0) {
+          this.logger.warn('Message already saved on chatwoot');
+          return null;
+        }
       }
     }
     const data = new FormData();
@@ -954,9 +955,10 @@ export class ChatwootService {
       const replyToIds = await this.getReplyToIds(messageBody, instance);
 
       if (replyToIds.in_reply_to || replyToIds.in_reply_to_external_id) {
-        data.append('content_attributes', {
+        const content = JSON.stringify({
           ...replyToIds,
         });
+        data.append('content_attributes', content);
       }
     }
 
@@ -1136,10 +1138,26 @@ export class ChatwootService {
     }
   }
 
-  public async onSendMessageError(instance: InstanceDto, conversation: number, error?: string) {
+  public async onSendMessageError(instance: InstanceDto, conversation: number, error?: any) {
+    this.logger.verbose(`onSendMessageError ${JSON.stringify(error)}`);
+
     const client = await this.clientCw(instance);
 
     if (!client) {
+      return;
+    }
+
+    if (error && error?.status === 400 && error?.message[0]?.exists === false) {
+      client.messages.create({
+        accountId: this.provider.accountId,
+        conversationId: conversation,
+        data: {
+          content: `${i18next.t('cw.message.numbernotinwhatsapp')}`,
+          message_type: 'outgoing',
+          private: true,
+        },
+      });
+
       return;
     }
 
@@ -1148,7 +1166,7 @@ export class ChatwootService {
       conversationId: conversation,
       data: {
         content: i18next.t('cw.message.notsent', {
-          error: error?.length > 0 ? `_${error}_` : '',
+          error: error ? `_${error.toString()}_` : '',
         }),
         message_type: 'outgoing',
         private: true,
@@ -1392,7 +1410,7 @@ export class ChatwootService {
               );
             } catch (error) {
               if (!messageSent && body.conversation?.id) {
-                this.onSendMessageError(instance, body.conversation?.id, error.toString());
+                this.onSendMessageError(instance, body.conversation?.id, error);
               }
               throw error;
             }
@@ -1596,7 +1614,16 @@ export class ChatwootService {
       thumbnailUrl: string;
       sourceUrl: string;
     }
-    const adsMessage: AdsMessage | undefined = msg.extendedTextMessage?.contextInfo?.externalAdReply;
+
+    const adsMessage: AdsMessage | undefined = {
+      title: msg.extendedTextMessage?.contextInfo?.externalAdReply?.title || msg.contextInfo?.externalAdReply?.title,
+      body: msg.extendedTextMessage?.contextInfo?.externalAdReply?.body || msg.contextInfo?.externalAdReply?.body,
+      thumbnailUrl:
+        msg.extendedTextMessage?.contextInfo?.externalAdReply?.thumbnailUrl ||
+        msg.contextInfo?.externalAdReply?.thumbnailUrl,
+      sourceUrl:
+        msg.extendedTextMessage?.contextInfo?.externalAdReply?.sourceUrl || msg.contextInfo?.externalAdReply?.sourceUrl,
+    };
 
     return adsMessage;
   }
@@ -1852,27 +1879,6 @@ export class ChatwootService {
         }
       }
 
-      if (event === 'contact.is_not_in_wpp') {
-        const getConversation = await this.createConversation(instance, body);
-
-        if (!getConversation) {
-          this.logger.warn('conversation not found');
-          return;
-        }
-
-        client.messages.create({
-          accountId: this.provider.accountId,
-          conversationId: getConversation,
-          data: {
-            content: `🚨 ${i18next.t('numbernotinwhatsapp')}`,
-            message_type: 'outgoing',
-            private: true,
-          },
-        });
-
-        return;
-      }
-
       if (event === 'messages.upsert' || event === 'send.message') {
         if (body.key.remoteJid === 'status@broadcast') {
           return;
@@ -1915,7 +1921,7 @@ export class ChatwootService {
 
         const isMedia = this.isMediaMessage(body.message);
 
-        const adsMessage = this.getAdsMessage(body.message);
+        const adsMessage = this.getAdsMessage(body);
 
         const reactionMessage = this.getReactionMessage(body.message);
 
@@ -2037,7 +2043,8 @@ export class ChatwootService {
           return;
         }
 
-        if (adsMessage) {
+        const isAdsMessage = (adsMessage && adsMessage.title) || adsMessage.body || adsMessage.thumbnailUrl;
+        if (isAdsMessage) {
           const imgBuffer = await axios.get(adsMessage.thumbnailUrl, { responseType: 'arraybuffer' });
 
           const extension = mime.getExtension(imgBuffer.headers['content-type']);
@@ -2063,11 +2070,13 @@ export class ChatwootService {
           fileStream.push(null);
 
           const truncStr = (str: string, len: number) => {
+            if (!str) return '';
+
             return str.length > len ? str.substring(0, len) + '...' : str;
           };
 
           const title = truncStr(adsMessage.title, 40);
-          const description = truncStr(adsMessage.body, 75);
+          const description = truncStr(adsMessage?.body, 75);
 
           const send = await this.sendData(
             getConversation,
@@ -2434,57 +2443,61 @@ export class ChatwootService {
     chatwootConfig: ChatwootDto,
     prepareMessage: (message: any) => any,
   ) {
-    if (!this.isImportHistoryAvailable()) {
-      return;
-    }
-    if (!this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
-      return;
-    }
-
-    const inbox = await this.getInbox(instance);
-
-    const sqlMessages = `select * from messages m
-    where account_id = ${chatwootConfig.accountId}
-    and inbox_id = ${inbox.id}
-    and created_at >= now() - interval '6h'
-    order by created_at desc`;
-
-    const messagesData = (await this.pgClient.query(sqlMessages))?.rows;
-    const ids: string[] = messagesData
-      .filter((message) => !!message.source_id)
-      .map((message) => message.source_id.replace('WAID:', ''));
-
-    const savedMessages = await this.prismaRepository.message.findMany({
-      where: {
-        Instance: { name: instance.instanceName },
-        messageTimestamp: { gte: dayjs().subtract(6, 'hours').unix() },
-        AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
-      },
-    });
-
-    const filteredMessages = savedMessages.filter(
-      (msg: any) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid),
-    );
-    const messagesRaw: any[] = [];
-    for (const m of filteredMessages) {
-      if (!m.message || !m.key || !m.messageTimestamp) {
-        continue;
+    try {
+      if (!this.isImportHistoryAvailable()) {
+        return;
+      }
+      if (!this.configService.get<Database>('DATABASE').SAVE_DATA.MESSAGE_UPDATE) {
+        return;
       }
 
-      if (Long.isLong(m?.messageTimestamp)) {
-        m.messageTimestamp = m.messageTimestamp?.toNumber();
+      const inbox = await this.getInbox(instance);
+
+      const sqlMessages = `select * from messages m
+      where account_id = ${chatwootConfig.accountId}
+      and inbox_id = ${inbox.id}
+      and created_at >= now() - interval '6h'
+      order by created_at desc`;
+
+      const messagesData = (await this.pgClient.query(sqlMessages))?.rows;
+      const ids: string[] = messagesData
+        .filter((message) => !!message.source_id)
+        .map((message) => message.source_id.replace('WAID:', ''));
+
+      const savedMessages = await this.prismaRepository.message.findMany({
+        where: {
+          Instance: { name: instance.instanceName },
+          messageTimestamp: { gte: dayjs().subtract(6, 'hours').unix() },
+          AND: ids.map((id) => ({ key: { path: ['id'], not: id } })),
+        },
+      });
+
+      const filteredMessages = savedMessages.filter(
+        (msg: any) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid),
+      );
+      const messagesRaw: any[] = [];
+      for (const m of filteredMessages) {
+        if (!m.message || !m.key || !m.messageTimestamp) {
+          continue;
+        }
+
+        if (Long.isLong(m?.messageTimestamp)) {
+          m.messageTimestamp = m.messageTimestamp?.toNumber();
+        }
+
+        messagesRaw.push(prepareMessage(m as any));
       }
 
-      messagesRaw.push(prepareMessage(m as any));
+      this.addHistoryMessages(
+        instance,
+        messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid)),
+      );
+
+      await chatwootImport.importHistoryMessages(instance, this, inbox, this.provider);
+      const waInstance = this.waMonitor.waInstances[instance.instanceName];
+      waInstance.clearCacheChatwoot();
+    } catch (error) {
+      return;
     }
-
-    this.addHistoryMessages(
-      instance,
-      messagesRaw.filter((msg) => !chatwootImport.isIgnorePhoneNumber(msg.key?.remoteJid)),
-    );
-
-    await chatwootImport.importHistoryMessages(instance, this, inbox, this.provider);
-    const waInstance = this.waMonitor.waInstances[instance.instanceName];
-    waInstance.clearCacheChatwoot();
   }
 }

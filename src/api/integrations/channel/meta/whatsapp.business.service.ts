@@ -4,7 +4,7 @@ import {
   MediaMessage,
   Options,
   SendAudioDto,
-  SendButtonDto,
+  SendButtonsDto,
   SendContactDto,
   SendListDto,
   SendLocationDto,
@@ -1108,11 +1108,11 @@ export class BusinessStartupService extends ChannelStartupService {
     return audioSent;
   }
 
-  public async buttonMessage(data: SendButtonDto) {
+  public async buttonMessage(data: SendButtonsDto) {
     const embeddedMedia: any = {};
 
     const btnItems = {
-      text: data.buttons.map((btn) => btn.text),
+      text: data.buttons.map((btn) => btn.displayText),
       ids: data.buttons.map((btn) => btn.id),
     };
 
@@ -1128,7 +1128,7 @@ export class BusinessStartupService extends ChannelStartupService {
           return {
             type: 'reply',
             reply: {
-              title: button.text,
+              title: button.displayText,
               id: button.id,
             },
           };

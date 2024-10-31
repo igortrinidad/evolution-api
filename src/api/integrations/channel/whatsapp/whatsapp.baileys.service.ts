@@ -31,19 +31,25 @@ import {
 import { InstanceDto, SetPresenceDto } from '@api/dto/instance.dto';
 import { HandleLabelDto, LabelDto } from '@api/dto/label.dto';
 import {
+  Button,
   ContactMessage,
+  KeyType,
   MediaMessage,
   Options,
   SendAudioDto,
+  SendButtonsDto,
   SendContactDto,
+  SendListDto,
   SendLocationDto,
   SendMediaDto,
   SendPollDto,
+  SendPtvDto,
   SendReactionDto,
   SendStatusDto,
   SendStickerDto,
   SendTextDto,
   StatusMessage,
+  TypeButton,
 } from '@api/dto/sendMessage.dto';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
@@ -117,10 +123,11 @@ import makeWASocket, {
 import { Label } from 'baileys/lib/Types/Label';
 import { LabelAssociation } from 'baileys/lib/Types/LabelAssociation';
 import { spawn } from 'child_process';
-import { isBase64, isURL } from 'class-validator';
+import { isArray, isBase64, isURL } from 'class-validator';
 import { randomBytes } from 'crypto';
 import EventEmitter2 from 'eventemitter2';
 import ffmpeg from 'fluent-ffmpeg';
+import FormData from 'form-data';
 import { readFileSync } from 'fs';
 import Long from 'long';
 import mime from 'mime';
@@ -132,10 +139,70 @@ import P from 'pino';
 import qrcode, { QRCodeToDataURLOptions } from 'qrcode';
 import qrcodeTerminal from 'qrcode-terminal';
 import sharp from 'sharp';
-import { PassThrough } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 const groupMetadataCache = new CacheService(new CacheEngine(configService, 'groups').getEngine());
+
+// Adicione a função getVideoDuration no início do arquivo
+async function getVideoDuration(input: Buffer | string | Readable): Promise<number> {
+  const MediaInfoFactory = (await import('mediainfo.js')).default;
+  const mediainfo = await MediaInfoFactory({ format: 'JSON' });
+
+  let fileSize: number;
+  let readChunk: (size: number, offset: number) => Promise<Buffer>;
+
+  if (Buffer.isBuffer(input)) {
+    fileSize = input.length;
+    readChunk = async (size: number, offset: number): Promise<Buffer> => {
+      return input.slice(offset, offset + size);
+    };
+  } else if (typeof input === 'string') {
+    const fs = await import('fs');
+    const stat = await fs.promises.stat(input);
+    fileSize = stat.size;
+    const fd = await fs.promises.open(input, 'r');
+
+    readChunk = async (size: number, offset: number): Promise<Buffer> => {
+      const buffer = Buffer.alloc(size);
+      await fd.read(buffer, 0, size, offset);
+      return buffer;
+    };
+
+    try {
+      const result = await mediainfo.analyzeData(() => fileSize, readChunk);
+      const jsonResult = JSON.parse(result);
+
+      const generalTrack = jsonResult.media.track.find((t: any) => t['@type'] === 'General');
+      const duration = generalTrack.Duration;
+
+      return Math.round(parseFloat(duration));
+    } finally {
+      await fd.close();
+    }
+  } else if (input instanceof Readable) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of input) {
+      chunks.push(chunk);
+    }
+    const data = Buffer.concat(chunks);
+    fileSize = data.length;
+
+    readChunk = async (size: number, offset: number): Promise<Buffer> => {
+      return data.slice(offset, offset + size);
+    };
+  } else {
+    throw new Error('Tipo de entrada não suportado');
+  }
+
+  const result = await mediainfo.analyzeData(() => fileSize, readChunk);
+  const jsonResult = JSON.parse(result);
+
+  const generalTrack = jsonResult.media.track.find((t: any) => t['@type'] === 'General');
+  const duration = generalTrack.Duration;
+
+  return Math.round(parseFloat(duration));
+}
 
 export class BaileysStartupService extends ChannelStartupService {
   constructor(
@@ -582,6 +649,23 @@ export class BaileysStartupService extends ChannelStartupService {
       cachedGroupMetadata: this.getGroupMetadataCache,
       userDevicesCache: this.userDevicesCache,
       transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
+      patchMessageBeforeSending(message) {
+        if (
+          message.deviceSentMessage?.message?.listMessage?.listType === proto.Message.ListMessage.ListType.PRODUCT_LIST
+        ) {
+          message = JSON.parse(JSON.stringify(message));
+
+          message.deviceSentMessage.message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
+        }
+
+        if (message.listMessage?.listType == proto.Message.ListMessage.ListType.PRODUCT_LIST) {
+          message = JSON.parse(JSON.stringify(message));
+
+          message.listMessage.listType = proto.Message.ListMessage.ListType.SINGLE_SELECT;
+        }
+
+        return message;
+      },
     };
 
     this.endSession = false;
@@ -1049,6 +1133,25 @@ export class BaileysStartupService extends ChannelStartupService {
           if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
             continue;
           }
+          const existingChat = await this.prismaRepository.chat.findFirst({
+            where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
+          });
+
+          if (existingChat) {
+            const chatToInsert = {
+              remoteJid: received.key.remoteJid,
+              instanceId: this.instanceId,
+              name: received.pushName || '',
+              unreadMessages: 0,
+            };
+
+            this.sendDataWebhook(Events.CHATS_UPSERT, [chatToInsert]);
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
+              await this.prismaRepository.chat.create({
+                data: chatToInsert,
+              });
+            }
+          }
 
           const messageRaw = this.prepareMessage(received);
 
@@ -1058,6 +1161,7 @@ export class BaileysStartupService extends ChannelStartupService {
             received?.message?.stickerMessage ||
             received?.message?.documentMessage ||
             received?.message?.documentWithCaptionMessage ||
+            received?.message?.ptvMessage ||
             received?.message?.audioMessage;
 
           if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
@@ -1364,6 +1468,26 @@ export class BaileysStartupService extends ChannelStartupService {
             await this.prismaRepository.messageUpdate.create({
               data: message,
             });
+
+          const existingChat = await this.prismaRepository.chat.findFirst({
+            where: { instanceId: this.instanceId, remoteJid: message.remoteJid },
+          });
+
+          if (existingChat) {
+            const chatToInsert = {
+              remoteJid: message.remoteJid,
+              instanceId: this.instanceId,
+              name: message.pushName || '',
+              unreadMessages: 0,
+            };
+
+            this.sendDataWebhook(Events.CHATS_UPSERT, [chatToInsert]);
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CHATS) {
+              await this.prismaRepository.chat.create({
+                data: chatToInsert,
+              });
+            }
+          }
         }
       }
 
@@ -1699,7 +1823,8 @@ export class BaileysStartupService extends ChannelStartupService {
           website: business?.website?.shift(),
         };
       } else {
-        const info: Instance = await waMonitor.instanceInfo(instanceName);
+        const instanceNames = instanceName ? [instanceName] : null;
+        const info: Instance = await waMonitor.instanceInfo(instanceNames);
         const business = await this.fetchBusinessProfile(jid);
 
         return {
@@ -1767,6 +1892,28 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (messageId) option.messageId = messageId;
     else option.messageId = '3EB0' + randomBytes(18).toString('hex').toUpperCase();
+
+    if (message['viewOnceMessage']) {
+      const m = generateWAMessageFromContent(sender, message, {
+        timestamp: new Date(),
+        userJid: this.instance.wuid,
+        messageId,
+        quoted,
+      });
+      const id = await this.client.relayMessage(sender, message, { messageId });
+      m.key = {
+        id: id,
+        remoteJid: sender,
+        participant: isJidUser(sender) ? sender : undefined,
+        fromMe: true,
+      };
+      for (const [key, value] of Object.entries(m)) {
+        if (!value || (isArray(value) && value.length) === 0) {
+          delete m[key];
+        }
+      }
+      return m;
+    }
 
     if (
       !message['audio'] &&
@@ -1898,17 +2045,6 @@ export class BaileysStartupService extends ChannelStartupService {
     const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
     if (!isWA.exists && !isJidGroup(isWA.jid) && !isWA.jid.includes('@broadcast')) {
-      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-        const body = {
-          key: { remoteJid: isWA.jid },
-        };
-
-        this.chatwootService.eventWhatsapp(
-          'contact.is_not_in_wpp',
-          { instanceName: this.instance.name, instanceId: this.instance.id },
-          body,
-        );
-      }
       throw new BadRequestException(isWA);
     }
 
@@ -2019,8 +2155,10 @@ export class BaileysStartupService extends ChannelStartupService {
         messageSent?.message?.imageMessage ||
         messageSent?.message?.videoMessage ||
         messageSent?.message?.stickerMessage ||
+        messageSent?.message?.ptvMessage ||
         messageSent?.message?.documentMessage ||
         messageSent?.message?.documentWithCaptionMessage ||
+        messageSent?.message?.ptvMessage ||
         messageSent?.message?.audioMessage;
 
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
@@ -2364,11 +2502,11 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private async prepareMediaMessage(mediaMessage: MediaMessage) {
     try {
+      const type = mediaMessage.mediatype === 'ptv' ? 'video' : mediaMessage.mediatype;
+
       const prepareMedia = await prepareWAMessageMedia(
         {
-          [mediaMessage.mediatype]: isURL(mediaMessage.media)
-            ? { url: mediaMessage.media }
-            : Buffer.from(mediaMessage.media, 'base64'),
+          [type]: isURL(mediaMessage.media) ? { url: mediaMessage.media } : Buffer.from(mediaMessage.media, 'base64'),
         } as any,
         { upload: this.client.waUploadToServer },
       );
@@ -2417,6 +2555,40 @@ export class BaileysStartupService extends ChannelStartupService {
           const response = await axios.get(mediaMessage.media, config);
 
           mimetype = response.headers['content-type'];
+        }
+      }
+
+      if (mediaMessage.mediatype === 'ptv') {
+        prepareMedia[mediaType] = prepareMedia[type + 'Message'];
+        mimetype = 'video/mp4';
+
+        if (!prepareMedia[mediaType]) {
+          throw new Error('Failed to prepare video message');
+        }
+
+        try {
+          let mediaInput;
+          if (isURL(mediaMessage.media)) {
+            mediaInput = mediaMessage.media;
+          } else {
+            const mediaBuffer = Buffer.from(mediaMessage.media, 'base64');
+            if (!mediaBuffer || mediaBuffer.length === 0) {
+              throw new Error('Invalid media buffer');
+            }
+            mediaInput = mediaBuffer;
+          }
+
+          const duration = await getVideoDuration(mediaInput);
+          if (!duration || duration <= 0) {
+            throw new Error('Invalid media duration');
+          }
+
+          this.logger.verbose(`Video duration: ${duration} seconds`);
+          prepareMedia[mediaType].seconds = duration;
+        } catch (error) {
+          this.logger.error('Error getting video duration:');
+          this.logger.error(error);
+          throw new Error(`Failed to get video duration: ${error.message}`);
         }
       }
 
@@ -2531,6 +2703,37 @@ export class BaileysStartupService extends ChannelStartupService {
     return mediaSent;
   }
 
+  public async ptvMessage(data: SendPtvDto, file?: any, isIntegration = false) {
+    const mediaData: SendMediaDto = {
+      number: data.number,
+      media: data.video,
+      mediatype: 'ptv',
+      delay: data?.delay,
+      quoted: data?.quoted,
+      mentionsEveryOne: data?.mentionsEveryOne,
+      mentioned: data?.mentioned,
+    };
+
+    if (file) mediaData.media = file.buffer.toString('base64');
+
+    const generate = await this.prepareMediaMessage(mediaData);
+
+    const mediaSent = await this.sendMessageWithTyping(
+      data.number,
+      { ...generate.message },
+      {
+        delay: data?.delay,
+        presence: 'composing',
+        quoted: data?.quoted,
+        mentionsEveryOne: data?.mentionsEveryOne,
+        mentioned: data?.mentioned,
+      },
+      isIntegration,
+    );
+
+    return mediaSent;
+  }
+
   public async processAudioMp4(audio: string) {
     let inputStream: PassThrough;
 
@@ -2599,53 +2802,78 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async processAudio(audio: string): Promise<Buffer> {
-    let inputAudioStream: PassThrough;
+    if (process.env.API_AUDIO_CONVERTER) {
+      this.logger.verbose('Using audio converter API');
+      const formData = new FormData();
 
-    if (isURL(audio)) {
-      const timestamp = new Date().getTime();
-      const url = `${audio}?timestamp=${timestamp}`;
+      if (isURL(audio)) {
+        formData.append('url', audio);
+      } else {
+        formData.append('base64', audio);
+      }
 
-      const config: any = {
-        responseType: 'stream',
-      };
+      const { data } = await axios.post(process.env.API_AUDIO_CONVERTER, formData, {
+        headers: {
+          ...formData.getHeaders(),
+          apikey: process.env.API_AUDIO_CONVERTER_KEY,
+        },
+      });
 
-      const response = await axios.get(url, config);
-      inputAudioStream = response.data.pipe(new PassThrough());
+      if (!data.audio) {
+        throw new InternalServerErrorException('Failed to convert audio');
+      }
+
+      this.logger.verbose('Audio converted');
+      return Buffer.from(data.audio, 'base64');
     } else {
-      const audioBuffer = Buffer.from(audio, 'base64');
-      inputAudioStream = new PassThrough();
-      inputAudioStream.end(audioBuffer);
-    }
+      let inputAudioStream: PassThrough;
 
-    return new Promise((resolve, reject) => {
-      const outputAudioStream = new PassThrough();
-      const chunks: Buffer[] = [];
+      if (isURL(audio)) {
+        const timestamp = new Date().getTime();
+        const url = `${audio}?timestamp=${timestamp}`;
 
-      outputAudioStream.on('data', (chunk) => chunks.push(chunk));
-      outputAudioStream.on('end', () => {
-        const outputBuffer = Buffer.concat(chunks);
-        resolve(outputBuffer);
-      });
+        const config: any = {
+          responseType: 'stream',
+        };
 
-      outputAudioStream.on('error', (error) => {
-        console.log('error', error);
-        reject(error);
-      });
+        const response = await axios.get(url, config);
+        inputAudioStream = response.data.pipe(new PassThrough());
+      } else {
+        const audioBuffer = Buffer.from(audio, 'base64');
+        inputAudioStream = new PassThrough();
+        inputAudioStream.end(audioBuffer);
+      }
 
-      ffmpeg.setFfmpegPath(ffmpegPath.path);
+      return new Promise((resolve, reject) => {
+        const outputAudioStream = new PassThrough();
+        const chunks: Buffer[] = [];
 
-      ffmpeg(inputAudioStream)
-        .outputFormat('ogg')
-        .noVideo()
-        .audioCodec('libopus')
-        .addOutputOptions('-avoid_negative_ts make_zero')
-        .audioChannels(1)
-        .pipe(outputAudioStream, { end: true })
-        .on('error', function (error) {
+        outputAudioStream.on('data', (chunk) => chunks.push(chunk));
+        outputAudioStream.on('end', () => {
+          const outputBuffer = Buffer.concat(chunks);
+          resolve(outputBuffer);
+        });
+
+        outputAudioStream.on('error', (error) => {
           console.log('error', error);
           reject(error);
         });
-    });
+
+        ffmpeg.setFfmpegPath(ffmpegPath.path);
+
+        ffmpeg(inputAudioStream)
+          .outputFormat('ogg')
+          .noVideo()
+          .audioCodec('libopus')
+          .addOutputOptions('-avoid_negative_ts make_zero')
+          .audioChannels(1)
+          .pipe(outputAudioStream, { end: true })
+          .on('error', function (error) {
+            console.log('error', error);
+            reject(error);
+          });
+      });
+    }
   }
 
   public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
@@ -2695,8 +2923,211 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
-  public async buttonMessage() {
-    throw new BadRequestException('Method not available on WhatsApp Baileys');
+  private generateRandomId(length = 11) {
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    return result;
+  }
+
+  private toJSONString(button: Button): string {
+    const toString = (obj: any) => JSON.stringify(obj);
+
+    const json = {
+      call: () => toString({ display_text: button.displayText, phone_number: button.phoneNumber }),
+      reply: () => toString({ display_text: button.displayText, id: button.id }),
+      copy: () => toString({ display_text: button.displayText, copy_code: button.copyCode }),
+      url: () =>
+        toString({
+          display_text: button.displayText,
+          url: button.url,
+          merchant_url: button.url,
+        }),
+      pix: () =>
+        toString({
+          currency: button.currency,
+          total_amount: {
+            value: 0,
+            offset: 100,
+          },
+          reference_id: this.generateRandomId(),
+          type: 'physical-goods',
+          order: {
+            status: 'pending',
+            subtotal: {
+              value: 0,
+              offset: 100,
+            },
+            order_type: 'ORDER',
+            items: [
+              {
+                name: '',
+                amount: {
+                  value: 0,
+                  offset: 100,
+                },
+                quantity: 0,
+                sale_amount: {
+                  value: 0,
+                  offset: 100,
+                },
+              },
+            ],
+          },
+          payment_settings: [
+            {
+              type: 'pix_static_code',
+              pix_static_code: {
+                merchant_name: button.name,
+                key: button.key,
+                key_type: this.mapKeyType.get(button.keyType),
+              },
+            },
+          ],
+          share_payment_status: false,
+        }),
+    };
+
+    return json[button.type]?.() || '';
+  }
+
+  private readonly mapType = new Map<TypeButton, string>([
+    ['reply', 'quick_reply'],
+    ['copy', 'cta_copy'],
+    ['url', 'cta_url'],
+    ['call', 'cta_call'],
+    ['pix', 'payment_info'],
+  ]);
+
+  private readonly mapKeyType = new Map<KeyType, string>([
+    ['phone', 'PHONE'],
+    ['email', 'EMAIL'],
+    ['cpf', 'CPF'],
+    ['cnpj', 'CNPJ'],
+    ['random', 'EVP'],
+  ]);
+
+  public async buttonMessage(data: SendButtonsDto) {
+    if (data.buttons.length === 0) {
+      throw new BadRequestException('At least one button is required');
+    }
+
+    const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
+
+    const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
+
+    const hasOtherButtons = data.buttons.some((btn) => btn.type !== 'reply' && btn.type !== 'pix');
+
+    if (hasReplyButtons) {
+      if (data.buttons.length > 3) {
+        throw new BadRequestException('Maximum of 3 reply buttons allowed');
+      }
+      if (hasOtherButtons) {
+        throw new BadRequestException('Reply buttons cannot be mixed with other button types');
+      }
+    }
+
+    if (hasPixButton) {
+      if (data.buttons.length > 1) {
+        throw new BadRequestException('Only one PIX button is allowed');
+      }
+      if (hasOtherButtons) {
+        throw new BadRequestException('PIX button cannot be mixed with other button types');
+      }
+
+      const message: proto.IMessage = {
+        viewOnceMessage: {
+          message: {
+            interactiveMessage: {
+              nativeFlowMessage: {
+                buttons: [
+                  {
+                    name: this.mapType.get('pix'),
+                    buttonParamsJson: this.toJSONString(data.buttons[0]),
+                  },
+                ],
+                messageParamsJson: JSON.stringify({
+                  from: 'api',
+                  templateId: v4(),
+                }),
+              },
+            },
+          },
+        },
+      };
+
+      return await this.sendMessageWithTyping(data.number, message, {
+        delay: data?.delay,
+        presence: 'composing',
+        quoted: data?.quoted,
+        mentionsEveryOne: data?.mentionsEveryOne,
+        mentioned: data?.mentioned,
+      });
+    }
+
+    const generate = await (async () => {
+      if (data?.thumbnailUrl) {
+        return await this.prepareMediaMessage({
+          mediatype: 'image',
+          media: data.thumbnailUrl,
+        });
+      }
+    })();
+
+    const buttons = data.buttons.map((value) => {
+      return {
+        name: this.mapType.get(value.type),
+        buttonParamsJson: this.toJSONString(value),
+      };
+    });
+
+    const message: proto.IMessage = {
+      viewOnceMessage: {
+        message: {
+          interactiveMessage: {
+            body: {
+              text: (() => {
+                let t = '*' + data.title + '*';
+                if (data?.description) {
+                  t += '\n\n';
+                  t += data.description;
+                  t += '\n';
+                }
+                return t;
+              })(),
+            },
+            footer: {
+              text: data?.footer,
+            },
+            header: (() => {
+              if (generate?.message?.imageMessage) {
+                return {
+                  hasMediaAttachment: !!generate.message.imageMessage,
+                  imageMessage: generate.message.imageMessage,
+                };
+              }
+            })(),
+            nativeFlowMessage: {
+              buttons: buttons,
+              messageParamsJson: JSON.stringify({
+                from: 'api',
+                templateId: v4(),
+              }),
+            },
+          },
+        },
+      },
+    };
+
+    return await this.sendMessageWithTyping(data.number, message, {
+      delay: data?.delay,
+      presence: 'composing',
+      quoted: data?.quoted,
+      mentionsEveryOne: data?.mentionsEveryOne,
+      mentioned: data?.mentioned,
+    });
   }
 
   public async locationMessage(data: SendLocationDto) {
@@ -2720,8 +3151,27 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
-  public async listMessage() {
-    throw new BadRequestException('Method not available on WhatsApp Baileys');
+  public async listMessage(data: SendListDto) {
+    return await this.sendMessageWithTyping(
+      data.number,
+      {
+        listMessage: {
+          title: data.title,
+          description: data.description,
+          buttonText: data?.buttonText,
+          footerText: data?.footerText,
+          sections: data.sections,
+          listType: 2,
+        },
+      },
+      {
+        delay: data?.delay,
+        presence: 'composing',
+        quoted: data?.quoted,
+        mentionsEveryOne: data?.mentionsEveryOne,
+        mentioned: data?.mentioned,
+      },
+    );
   }
 
   public async contactMessage(data: SendContactDto) {
