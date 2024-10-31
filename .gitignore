@@ -48,3 +48,6 @@ docker-compose.yaml
 .DS_Store
 *.DS_Store
 .tool-versions
+
+.history
+docker_volumes
