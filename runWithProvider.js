@@ -3,7 +3,7 @@ const { execSync } = require('child_process');
 dotenv.config();
 
 const { DATABASE_PROVIDER } = process.env;
-const databaseProviderDefault = DATABASE_PROVIDER ?? "postgresql"
+const databaseProviderDefault = DATABASE_PROVIDER ?? 'postgresql';
 
 if (!DATABASE_PROVIDER) {
   console.error(`DATABASE_PROVIDER is not set in the .env file, using default: ${databaseProviderDefault}`);
@@ -18,6 +18,7 @@ const command = process.argv
 try {
   execSync(command, { stdio: 'inherit' });
 } catch (error) {
+  console.log(error);
   console.error(`Error executing command: ${command}`);
   process.exit(1);
 }
